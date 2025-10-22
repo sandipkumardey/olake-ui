@@ -1,565 +1,425 @@
-import { useState, useRef } from "react"
-import { useNavigate, Link, useLocation } from "react-router-dom"
-import { message } from "antd"
-import { ArrowLeft, ArrowRight, DownloadSimple } from "@phosphor-icons/react"
-import { v4 as uuidv4 } from "uuid"
+import { useState, useEffect } from "react"
+import { useNavigate, useParams } from "react-router-dom"
+import { Button, Card, Col, Form, Row, Select, Typography, message } from "antd"
+import { ArrowLeft, Check, Plus, X } from "@phosphor-icons/react"
+import { Form as RJSFForm } from "@rjsf/antd"
+import validator from "@rjsf/validator-ajv8"
 
 import { useAppStore } from "@store/index"
-import { destinationService, sourceService, jobService } from "@api/index"
-
-import { JobBase, JobCreationSteps } from "@app-types/index"
+import { jobService, sourceService, destinationService } from "@api/index"
+import { Source, Destination, Job, JobType } from "@app-types/index"
 import {
-	getConnectorInLowerCase,
-	getSelectedStreams,
-	validateCronExpression,
-	validateStreams,
-} from "../../../utils/utils"
+  getConnectorImage,
+  getConnectorDocumentationPath,
+  getFormDataFromSpec,
+  handleSpecResponse,
+  withAbortController,
+} from "@utils/utils"
 import {
-	DESTINATION_INTERNAL_TYPES,
-	JOB_CREATION_STEPS,
-	JOB_STEP_NUMBERS,
+  JOB_TYPES,
+  JOB_TYPE_OPTIONS,
+  JOB_SCHEDULE_OPTIONS,
+  transformErrors,
+  CONNECTOR_TYPES,
+  SOURCE_INTERNAL_TYPES,
+  DESTINATION_INTERNAL_TYPES,
 } from "@utils/constants"
+import DocumentationPanel from "@modules/common/components/DocumentationPanel"
+import StepTitle from "@modules/common/components/StepTitle"
+import ObjectFieldTemplate from "@modules/common/components/Form/ObjectFieldTemplate"
+import CustomFieldTemplate from "@modules/common/components/Form/CustomFieldTemplate"
+import ArrayFieldTemplate from "@modules/common/components/Form/ArrayFieldTemplate"
+import { widgets } from "@modules/common/components/Form/widgets"
 
-// Internal imports from components
-import JobConfiguration from "../components/JobConfiguration"
-import StepProgress from "../components/StepIndicator"
-import CreateSource from "@modules/sources/pages/CreateSource"
-import CreateDestination from "@modules/destinations/pages/CreateDestination"
-import SchemaConfiguration from "./SchemaConfiguration"
-import TestConnectionModal from "../../common/Modals/TestConnectionModal"
-import TestConnectionSuccessModal from "../../common/Modals/TestConnectionSuccessModal"
-import TestConnectionFailureModal from "../../common/Modals/TestConnectionFailureModal"
-import EntitySavedModal from "../../common/Modals/EntitySavedModal"
-import EntityCancelModal from "../../common/Modals/EntityCancelModal"
-import ResetStreamsModal from "../../common/Modals/ResetStreamsModal"
+const { Option } = Select
+const { Title, Text } = Typography
 
-const JobCreation: React.FC = () => {
-	const navigate = useNavigate()
-	const location = useLocation()
-	const initialData = location.state?.initialData || {}
-	const savedJobId = location.state?.savedJobId
+const JobCreation = () => {
+  const [form] = Form.useForm()
+  const navigate = useNavigate()
+  const { sourceId, destinationId } = useParams<{
+    sourceId?: string
+    destinationId?: string
+  }>()
 
-	const [currentStep, setCurrentStep] = useState<JobCreationSteps>(
-		JOB_CREATION_STEPS.CONFIG as JobCreationSteps,
-	)
-	const [docsMinimized, setDocsMinimized] = useState(false)
-	const [sourceName, setSourceName] = useState(initialData.sourceName || "")
-	const [sourceConnector, setSourceConnector] = useState(
-		initialData.sourceConnector || "MongoDB",
-	)
-	const [sourceFormData, setSourceFormData] = useState<any>(
-		initialData.sourceFormData || {},
-	)
-	const [sourceVersion, setSourceVersion] = useState(
-		initialData.sourceVersion || "",
-	)
-	const [destinationName, setDestinationName] = useState(
-		initialData.destinationName || "",
-	)
-	const [destinationCatalogType, setDestinationCatalogType] = useState<
-		string | null
-	>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [sources, setSources] = useState<Source[]>([])
+  const [destinations, setDestinations] = useState<Destination[]>([])
+  const [selectedSource, setSelectedSource] = useState<Source | null>(null)
+  const [selectedDestination, setSelectedDestination] =
+    useState<Destination | null>(null)
+  const [jobType, setJobType] = useState<JobType>(
+    JOB_TYPES.FULL_REFRESH
+  )
+  const [schema, setSchema] = useState<any>(null)
+  const [uiSchema, setUiSchema] = useState<any>(null)
+  const [formData, setFormData] = useState<any>({})
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
-	const [destinationConnector, setDestinationConnector] = useState(
-		initialData.destinationConnector || DESTINATION_INTERNAL_TYPES.S3,
-	)
-	const [destinationFormData, setDestinationFormData] = useState<any>(
-		initialData.destinationFormData || {},
-	)
-	const [destinationVersion, setDestinationVersion] = useState(
-		initialData.destinationVersion || "",
-	)
-	const [selectedStreams, setSelectedStreams] = useState<any>(
-		initialData.selectedStreams || [],
-	)
-	const [jobName, setJobName] = useState(initialData.jobName || "")
-	const [cronExpression, setCronExpression] = useState(
-		initialData.cronExpression || "* * * * *",
-	)
-	const [jobNameFilled, setJobNameFilled] = useState(
-		initialData.isJobNameFilled || false,
-	)
-	const [isStreamsLoading, setIsStreamsLoading] = useState(false)
-	const [isFromSources, setIsFromSources] = useState(true)
+  const { user } = useAppStore()
 
-	const {
-		setShowEntitySavedModal,
-		setShowSourceCancelModal,
-		setShowTestingModal,
-		setShowSuccessModal,
-		addJob,
-		setShowFailureModal,
-		setSourceTestConnectionError,
-		setDestinationTestConnectionError,
-		setShowResetStreamsModal,
-	} = useAppStore()
+  useEffect(() => {
+    fetchSources()
+    fetchDestinations()
+  }, [])
 
-	const sourceRef = useRef<any>(null)
-	const destinationRef = useRef<any>(null)
+  useEffect(() => {
+    if (sourceId && sources.length > 0) {
+      const source = sources.find((s) => s.id === sourceId)
+      if (source) {
+        setSelectedSource(source)
+        form.setFieldsValue({ sourceId })
+      }
+    }
+  }, [sourceId, sources])
 
-	// Validation functions
-	const validateSource = async (): Promise<boolean> => {
-		if (sourceRef.current) {
-			const isValid = await sourceRef.current.validateSource()
-			if (!isValid) {
-				message.error("Please fill in all required fields for the source")
-				return false
-			}
-		} else if (!sourceName.trim() && sourceVersion.trim() != "") {
-			message.error("Source name is required")
-			return false
-		}
-		return true
-	}
+  useEffect(() => {
+    if (destinationId && destinations.length > 0) {
+      const destination = destinations.find((d) => d.id === destinationId)
+      if (destination) {
+        setSelectedDestination(destination)
+        form.setFieldsValue({ destinationId })
+      }
+    }
+  }, [destinationId, destinations])
 
-	const validateDestination = async (): Promise<boolean> => {
-		if (destinationRef.current) {
-			const isValid = await destinationRef.current.validateDestination()
-			if (!isValid) {
-				message.error("Please fill in all required fields for the destination")
-				return false
-			}
-		} else if (!destinationName.trim() && destinationVersion.trim() != "") {
-			message.error("Destination name is required")
-			return false
-		}
-		return true
-	}
+  const fetchSources = async () => {
+    try {
+      const response = await sourceService.getSources()
+      setSources(response.data.sources)
+    } catch (error) {
+      console.error("Error fetching sources:", error)
+      message.error("Failed to load sources")
+    }
+  }
 
-	const validateConfig = (): boolean => {
-		if (!jobName.trim()) {
-			message.error("Job name is required")
-			return false
-		}
-		return validateCronExpression(cronExpression)
-	}
+  const fetchDestinations = async () => {
+    try {
+      const response = await destinationService.getDestinations()
+      setDestinations(response.data.destinations)
+    } catch (error) {
+      console.error("Error fetching destinations:", error)
+      message.error("Failed to load destinations")
+    } finally {
+      setLoading(false)
+    }
+  }
 
-	const checkJobNameUnique = async (): Promise<boolean | null> => {
-		try {
-			const response = await jobService.checkJobNameUnique(jobName)
-			return response.unique
-		} catch {
-			message.error("Failed to check job name uniqueness. Please try again.")
-			return null
-		}
-	}
+  const fetchJobSpec = async (sourceType: string, destinationType: string) => {
+    try {
+      const response = await jobService.getJobSpec(sourceType, destinationType)
+      const { schema: specSchema, uiSchema: specUiSchema } = handleSpecResponse(
+        response.data.spec
+      )
+      setSchema(specSchema)
+      setUiSchema(specUiSchema)
+      setFormData({})
+    } catch (error) {
+      console.error("Error fetching job spec:", error)
+      message.error("Failed to load job specification")
+    }
+  }
 
-	// Connection test handler
-	const handleConnectionTest = async (
-		isSource: boolean,
-		data: any,
-		nextStep: JobCreationSteps,
-	): Promise<void> => {
-		setShowTestingModal(true)
-		try {
-			const testResult = isSource
-				? await sourceService.testSourceConnection(data)
-				: await destinationService.testDestinationConnection(
-						data,
-						getConnectorInLowerCase(sourceConnector),
-						sourceVersion,
-					)
+  const handleSourceChange = (value: string) => {
+    const source = sources.find((s) => s.id === value)
+    setSelectedSource(source || null)
+    if (source && selectedDestination) {
+      fetchJobSpec(source.type, selectedDestination.type)
+    }
+  }
 
-			setTimeout(() => {
-				setShowTestingModal(false)
-				if (testResult.data?.status === "SUCCEEDED") {
-					setShowSuccessModal(true)
-					setTimeout(() => {
-						setShowSuccessModal(false)
-						setCurrentStep(nextStep)
-					}, 1000)
-				} else {
-					setIsFromSources(isSource)
-					if (isSource) {
-						setSourceTestConnectionError(testResult.data?.message || "")
-					} else {
-						setDestinationTestConnectionError(testResult.data?.message || "")
-					}
-					setShowFailureModal(true)
-				}
-			}, 1500)
-		} catch {
-			setShowTestingModal(false)
-			message.error(
-				isSource
-					? "Source connection test failed"
-					: "Destination connection test failed",
-			)
-		}
-	}
+  const handleDestinationChange = (value: string) => {
+    const destination = destinations.find((d) => d.id === value)
+    setSelectedDestination(destination)
+    if (selectedSource && destination) {
+      fetchJobSpec(selectedSource.type, destination.type)
+    }
+  }
 
-	// Job creation handler
-	const handleJobCreation = async () => {
-		const newJobData: JobBase = {
-			name: jobName,
-			source: {
-				name: sourceName,
-				type: getConnectorInLowerCase(sourceConnector),
-				version: sourceVersion,
-				config: JSON.stringify(sourceFormData),
-			},
-			destination: {
-				name: destinationName,
-				type: getConnectorInLowerCase(destinationConnector),
-				version: destinationVersion,
-				config: JSON.stringify(destinationFormData),
-			},
-			streams_config: JSON.stringify({
-				...selectedStreams,
-				selected_streams: getSelectedStreams(selectedStreams.selected_streams),
-			}),
-			frequency: cronExpression,
-		}
+  const handleJobTypeChange = (value: JobType) => {
+    setJobType(value)
+  }
 
-		try {
-			await addJob(newJobData)
-			if (savedJobId) {
-				const savedJobs = JSON.parse(localStorage.getItem("savedJobs") || "[]")
-				const updatedSavedJobs = savedJobs.filter(
-					(job: any) => job.id !== savedJobId,
-				)
-				localStorage.setItem("savedJobs", JSON.stringify(updatedSavedJobs))
-			}
-			setShowEntitySavedModal(true)
-		} catch (error) {
-			console.error("Error adding job:", error)
-			message.error("Failed to create job")
-		}
-	}
+  const handleSubmit = async (values: any) => {
+    if (!selectedSource || !selectedDestination) {
+      message.error("Please select both source and destination")
+      return
+    }
 
-	// Main handler
-	const handleNext = async () => {
-		switch (currentStep) {
-			case JOB_CREATION_STEPS.SOURCE: {
-				if (!(await validateSource())) return
-				const sourceData = {
-					name: sourceName,
-					type: getConnectorInLowerCase(sourceConnector),
-					version: sourceVersion,
-					config:
-						typeof sourceFormData === "string"
-							? sourceFormData
-							: JSON.stringify(sourceFormData),
-				}
-				await handleConnectionTest(
-					true,
-					sourceData,
-					JOB_CREATION_STEPS.DESTINATION,
-				)
-				break
-			}
-			case JOB_CREATION_STEPS.DESTINATION: {
-				if (!(await validateDestination())) return
-				const destinationData = {
-					name: destinationName,
-					type: getConnectorInLowerCase(destinationConnector),
-					config:
-						typeof destinationFormData === "string"
-							? destinationFormData
-							: JSON.stringify(destinationFormData),
-					version: destinationVersion,
-				}
-				await handleConnectionTest(
-					false,
-					destinationData,
-					JOB_CREATION_STEPS.STREAMS,
-				)
-				break
-			}
-			case JOB_CREATION_STEPS.STREAMS:
-				if (
-					!validateStreams(getSelectedStreams(selectedStreams.selected_streams))
-				) {
-					message.error("Filter Value cannot be empty")
-					return
-				}
-				await handleJobCreation()
-				break
-			case JOB_CREATION_STEPS.CONFIG:
-				if (!validateConfig()) return
+    try {
+      setSaving(true)
+      const jobData: Partial<Job> = {
+        name: values.name,
+        description: values.description,
+        source_id: selectedSource.id,
+        destination_id: selectedDestination.id,
+        type: jobType,
+        config: {
+          ...formData,
+          schedule: values.schedule,
+        },
+        created_by: user?.id,
+      }
 
-				const isUnique = await checkJobNameUnique()
-				if (isUnique === null) {
-					return
-				}
-				if (!isUnique) {
-					message.error(
-						"Job name already exists. Please choose a different name.",
-					)
-					return
-				}
-				//TODO : Job name is disabled once filled and moved to next step , need to be handled later
-				setJobNameFilled(true)
-				setCurrentStep(JOB_CREATION_STEPS.SOURCE)
-				break
-			default:
-				console.warn("Unknown step:", currentStep)
-		}
-	}
+      await jobService.createJob(jobData)
+      message.success("Job created successfully")
+      navigate("/jobs")
+    } catch (error) {
+      console.error("Error creating job:", error)
+      message.error("Failed to create job")
+    } finally {
+      setSaving(false)
+    }
+  }
 
-	//TODO: Handle steps properly
+  if (loading) {
+    return <div>Loading...</div>
+  }
 
-	const handleConfirmResetStreams = () => {
-		setSelectedStreams([])
-		setCurrentStep(JOB_CREATION_STEPS.DESTINATION)
-	}
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center space-x-4">
+        <Button
+          type="text"
+          icon={<ArrowLeft size={20} />}
+          onClick={() => navigate(-1)}
+        />
+        <Title level={3} className="mb-0">
+          Create New Job
+        </Title>
+      </div>
 
-	const nextStep = () => {
-		if (currentStep === JOB_CREATION_STEPS.SOURCE) {
-			setCurrentStep(JOB_CREATION_STEPS.DESTINATION)
-		} else if (currentStep === JOB_CREATION_STEPS.DESTINATION) {
-			setCurrentStep(JOB_CREATION_STEPS.STREAMS)
-		} else if (currentStep === JOB_CREATION_STEPS.CONFIG) {
-			setCurrentStep(JOB_CREATION_STEPS.SOURCE)
-		}
-	}
+      <Form
+        form={form}
+        layout="vertical"
+        onFinish={handleSubmit}
+        initialValues={{
+          schedule: "@daily",
+          type: JOB_TYPES.FULL_REFRESH,
+        }}
+      >
+        <Row gutter={[24, 24]}>
+          <Col xs={24} lg={16}>
+            <Card className="mb-6">
+              <StepTitle
+                title="Basic Information"
+                stepNumber={1}
+                className="mb-6"
+              />
 
-	const handleBack = () => {
-		if (currentStep === JOB_CREATION_STEPS.DESTINATION) {
-			setCurrentStep(JOB_CREATION_STEPS.SOURCE)
-		} else if (currentStep === JOB_CREATION_STEPS.STREAMS) {
-			setShowResetStreamsModal(true)
-		} else if (currentStep === JOB_CREATION_STEPS.SOURCE) {
-			setCurrentStep(JOB_CREATION_STEPS.CONFIG)
-		}
-	}
+              <Form.Item
+                name="name"
+                label="Job Name"
+                rules={[
+                  { required: true, message: "Please enter a job name" },
+                  {
+                    max: 100,
+                    message: "Name cannot be longer than 100 characters",
+                  },
+                ]}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded border border-gray-300 p-2"
+                  placeholder="e.g., Production Data Sync"
+                />
+              </Form.Item>
 
-	const handleCancel = () => {
-		if (currentStep === JOB_CREATION_STEPS.SOURCE) {
-			setShowSourceCancelModal(true)
-		} else {
-			message.info("Job creation cancelled")
-			navigate("/jobs")
-		}
-	}
+              <Form.Item name="description" label="Description (Optional)">
+                <textarea
+                  className="w-full rounded border border-gray-300 p-2"
+                  rows={3}
+                  placeholder="A brief description of this job"
+                />
+              </Form.Item>
+            </Card>
 
-	const handleSaveJob = () => {
-		const jobData = {
-			id: savedJobId || uuidv4(),
-			name: jobName,
-			source: {
-				name: sourceName,
-				type: getConnectorInLowerCase(sourceConnector),
-				version: sourceVersion,
-				config: JSON.stringify(sourceFormData),
-			},
-			destination: {
-				name: destinationName,
-				type: getConnectorInLowerCase(destinationConnector),
-				version: destinationVersion,
-				config: JSON.stringify(destinationFormData),
-			},
-			streams_config: JSON.stringify(selectedStreams),
-			frequency: cronExpression,
-		}
+            <Card className="mb-6">
+              <StepTitle
+                title="Source & Destination"
+                stepNumber={2}
+                className="mb-6"
+              />
 
-		const savedJobs = JSON.parse(localStorage.getItem("savedJobs") || "[]")
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+                <div>
+                  <Form.Item
+                    name="sourceId"
+                    label="Source"
+                    rules={[
+                      { required: true, message: "Please select a source" },
+                    ]}
+                  >
+                    <Select
+                      placeholder="Select a source"
+                      onChange={handleSourceChange}
+                      showSearch
+                      optionFilterProp="children"
+                      filterOption={(input, option) =>
+                        (option?.children ?? "")
+                          .toLowerCase()
+                          .includes(input.toLowerCase())
+                      }
+                    >
+                      {sources.map((source) => (
+                        <Option key={source.id} value={source.id}>
+                          <div className="flex items-center">
+                            <img
+                              src={getConnectorImage(source.type)}
+                              alt={source.type}
+                              className="mr-2 h-5 w-5"
+                            />
+                            {source.name}
+                          </div>
+                        </Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
 
-		if (savedJobId) {
-			// Update existing saved job
-			const updatedSavedJobs = savedJobs.map((job: any) =>
-				job.id === savedJobId ? jobData : job,
-			)
-			localStorage.setItem("savedJobs", JSON.stringify(updatedSavedJobs))
-			message.success("Job saved successfully!")
-		} else {
-			// Create new saved job
-			savedJobs.push(jobData)
-			localStorage.setItem("savedJobs", JSON.stringify(savedJobs))
-			message.success("Job saved successfully!")
-		}
+                  {selectedSource && (
+                    <div className="mt-2 flex items-center text-sm text-gray-500">
+                      <span className="mr-2">Type:</span>
+                      <span className="font-medium">
+                        {CONNECTOR_TYPES[selectedSource.type]?.name ||
+                          selectedSource.type}
+                      </span>
+                    </div>
+                  )}
+                </div>
 
-		navigate("/jobs")
-	}
+                <div>
+                  <Form.Item
+                    name="destinationId"
+                    label="Destination"
+                    rules={[
+                      {
+                        required: true,
+                        message: "Please select a destination",
+                      },
+                    ]}
+                  >
+                    <Select
+                      placeholder="Select a destination"
+                      onChange={handleDestinationChange}
+                      showSearch
+                      optionFilterProp="children"
+                      filterOption={(input, option) =>
+                        (option?.children ?? "")
+                          .toLowerCase()
+                          .includes(input.toLowerCase())
+                      }
+                    >
+                      {destinations.map((destination) => (
+                        <Option key={destination.id} value={destination.id}>
+                          <div className="flex items-center">
+                            <img
+                              src={getConnectorImage(destination.type)}
+                              alt={destination.type}
+                              className="mr-2 h-5 w-5"
+                            />
+                            {destination.name}
+                          </div>
+                        </Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
 
-	return (
-		<div className="flex h-screen flex-col">
-			{/* Header */}
-			<div className="bg-white px-6 pb-3 pt-6">
-				<div className="flex items-center justify-between">
-					<div className="flex items-center gap-2">
-						<Link
-							to="/jobs"
-							className="flex items-center gap-2 p-1.5 hover:rounded-md hover:bg-gray-100 hover:text-black"
-						>
-							<ArrowLeft className="mr-1 size-5" />
-						</Link>
+                  {selectedDestination && (
+                    <div className="mt-2 flex items-center text-sm text-gray-500">
+                      <span className="mr-2">Type:</span>
+                      <span className="font-medium">
+                        {CONNECTOR_TYPES[selectedDestination.type]?.name ||
+                          selectedDestination.type}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Card>
 
-						<div className="text-2xl font-bold"> Create Job</div>
-					</div>
-					{/* Stepper */}
-					<StepProgress currentStep={currentStep} />
-				</div>
-			</div>
+            {schema && selectedSource && selectedDestination && (
+              <Card className="mb-6">
+                <StepTitle
+                  title="Configuration"
+                  stepNumber={3}
+                  className="mb-6"
+                />
 
-			<div className="flex flex-1 overflow-hidden border-t border-gray-200">
-				<div
-					className={`w-full ${currentStep === JOB_CREATION_STEPS.STREAMS ? "" : "overflow-hidden"} pt-0 transition-all duration-300`}
-				>
-					{currentStep === JOB_CREATION_STEPS.SOURCE && (
-						<div className="h-full w-full overflow-auto">
-							<CreateSource
-								fromJobFlow={true}
-								stepNumber={JOB_STEP_NUMBERS.SOURCE}
-								stepTitle="Set up your source"
-								onSourceNameChange={setSourceName}
-								onConnectorChange={setSourceConnector}
-								initialConnector={sourceConnector}
-								onFormDataChange={data => {
-									setSourceFormData(data)
-								}}
-								initialFormData={sourceFormData}
-								initialName={sourceName}
-								initialVersion={sourceVersion}
-								onVersionChange={setSourceVersion}
-								onComplete={() => {
-									setCurrentStep(JOB_CREATION_STEPS.DESTINATION)
-								}}
-								ref={sourceRef}
-								docsMinimized={docsMinimized}
-								onDocsMinimizedChange={setDocsMinimized}
-							/>
-						</div>
-					)}
+                <div className="mb-6">
+                  <Form.Item
+                    name="type"
+                    label="Sync Mode"
+                    rules={[
+                      { required: true, message: "Please select a sync mode" },
+                    ]}
+                  >
+                    <Select
+                      options={JOB_TYPE_OPTIONS}
+                      onChange={handleJobTypeChange}
+                    />
+                  </Form.Item>
 
-					{currentStep === JOB_CREATION_STEPS.DESTINATION && (
-						<div className="h-full w-full overflow-auto">
-							<CreateDestination
-								fromJobFlow={true}
-								stepNumber={JOB_STEP_NUMBERS.DESTINATION}
-								stepTitle="Set up your destination"
-								onDestinationNameChange={setDestinationName}
-								onConnectorChange={setDestinationConnector}
-								initialConnector={getConnectorInLowerCase(destinationConnector)}
-								initialVersion={destinationVersion}
-								onFormDataChange={data => {
-									setDestinationFormData(data)
-								}}
-								initialFormData={destinationFormData}
-								initialName={destinationName}
-								initialCatalog={destinationCatalogType}
-								onCatalogTypeChange={setDestinationCatalogType}
-								onVersionChange={setDestinationVersion}
-								onComplete={() => {
-									setCurrentStep(JOB_CREATION_STEPS.STREAMS)
-								}}
-								ref={destinationRef}
-								docsMinimized={docsMinimized}
-								onDocsMinimizedChange={setDocsMinimized}
-								sourceConnector={sourceConnector}
-								sourceVersion={sourceVersion}
-							/>
-						</div>
-					)}
+                  <Form.Item
+                    name="schedule"
+                    label="Schedule"
+                    rules={[
+                      { required: true, message: "Please select a schedule" },
+                    ]}
+                  >
+                    <Select options={JOB_SCHEDULE_OPTIONS} />
+                  </Form.Item>
+                </div>
 
-					{currentStep === JOB_CREATION_STEPS.STREAMS && (
-						<div className="h-full overflow-scroll">
-							<SchemaConfiguration
-								selectedStreams={selectedStreams}
-								setSelectedStreams={setSelectedStreams}
-								stepNumber={JOB_STEP_NUMBERS.STREAMS}
-								stepTitle="Streams Selection"
-								useDirectForms={true}
-								sourceName={sourceName}
-								sourceConnector={getConnectorInLowerCase(sourceConnector)}
-								sourceVersion={sourceVersion}
-								sourceConfig={
-									typeof sourceFormData === "string"
-										? sourceFormData
-										: JSON.stringify(sourceFormData)
-								}
-								initialStreamsData={
-									selectedStreams &&
-									selectedStreams.selected_streams &&
-									Object.keys(selectedStreams.selected_streams).length > 0
-										? selectedStreams
-										: undefined
-								}
-								destinationType={getConnectorInLowerCase(destinationConnector)}
-								jobName={jobName}
-								onLoadingChange={setIsStreamsLoading}
-							/>
-						</div>
-					)}
+                <RJSFForm
+                  schema={schema}
+                  uiSchema={uiSchema}
+                  formData={formData}
+                  validator={validator}
+                  onChange={({ formData }) => setFormData(formData)}
+                  onSubmit={({ formData }) =>
+                    handleSubmit({ ...form.getFieldsValue(), ...formData })
+                  }
+                  templates={{
+                    ObjectFieldTemplate,
+                    FieldTemplate: CustomFieldTemplate,
+                    ArrayFieldTemplate,
+                  }}
+                  widgets={widgets}
+                  transformErrors={transformErrors}
+                  onError={console.error}
+                >
+                  <div className="flex justify-end">
+                    <Button
+                      type="primary"
+                      htmlType="submit"
+                      loading={saving}
+                      className="bg-blue-600"
+                    >
+                      Create Job
+                    </Button>
+                  </div>
+                </RJSFForm>
+              </Card>
+            )}
+          </Col>
 
-					{currentStep === JOB_CREATION_STEPS.CONFIG && (
-						<JobConfiguration
-							jobName={jobName}
-							setJobName={setJobName}
-							cronExpression={cronExpression}
-							setCronExpression={setCronExpression}
-							stepNumber={JOB_STEP_NUMBERS.CONFIG}
-							stepTitle="Job Configuration"
-							jobNameFilled={jobNameFilled}
-						/>
-					)}
-				</div>
-			</div>
-
-			{/* Footer */}
-			<div className="flex justify-between border-t border-gray-200 bg-white p-4">
-				<div className="flex space-x-4">
-					<button
-						className="rounded-md border border-danger px-4 py-1 text-danger hover:bg-danger hover:text-white"
-						onClick={handleCancel}
-					>
-						Cancel
-					</button>
-					<button
-						onClick={handleSaveJob}
-						className="flex items-center justify-center gap-2 rounded-md border border-gray-400 px-4 py-1 font-light hover:bg-[#ebebeb]"
-					>
-						<DownloadSimple className="size-4" />
-						Save Job
-					</button>
-				</div>
-				<div
-					className={`flex items-center transition-[margin] duration-500 ease-in-out ${!docsMinimized && (currentStep === JOB_CREATION_STEPS.SOURCE || currentStep === JOB_CREATION_STEPS.DESTINATION) ? "mr-[40%]" : "mr-[4%]"}`}
-				>
-					{currentStep !== JOB_CREATION_STEPS.CONFIG && (
-						<button
-							onClick={handleBack}
-							className="mr-4 rounded-md border border-gray-400 px-4 py-1 font-light hover:bg-[#ebebeb] disabled:cursor-not-allowed disabled:opacity-50"
-							disabled={
-								currentStep === JOB_CREATION_STEPS.STREAMS && isStreamsLoading
-							}
-						>
-							Back
-						</button>
-					)}
-					<button
-						className="flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-1 font-light text-white hover:bg-primary-600"
-						onClick={handleNext}
-					>
-						{currentStep === JOB_CREATION_STEPS.STREAMS ? "Create Job" : "Next"}
-						<ArrowRight className="size-4 text-white" />
-					</button>
-					<TestConnectionModal />
-					<TestConnectionSuccessModal />
-					<EntitySavedModal
-						type={currentStep}
-						onComplete={nextStep}
-						fromJobFlow={true}
-						entityName={
-							currentStep === JOB_CREATION_STEPS.SOURCE
-								? sourceName
-								: currentStep === JOB_CREATION_STEPS.DESTINATION
-									? destinationName
-									: currentStep === JOB_CREATION_STEPS.STREAMS
-										? jobName
-										: ""
-						}
-					/>
-					<TestConnectionFailureModal fromSources={isFromSources} />
-					<EntityCancelModal
-						type="job"
-						navigateTo="jobs"
-					/>
-				</div>
-			</div>
-			<ResetStreamsModal onConfirm={handleConfirmResetStreams} />
-		</div>
-	)
+          <Col xs={24} lg={8}>
+            {selectedSource && selectedDestination && (
+              <DocumentationPanel
+                connectorType={`${selectedSource.type}-to-${selectedDestination.type}`}
+                connectorName={`${CONNECTOR_TYPES[selectedSource.type]?.name || selectedSource.type} to ${CONNECTOR_TYPES[selectedDestination.type]?.name || selectedDestination.type}`}
+                docsPath={getConnectorDocumentationPath(
+                  `${selectedSource.type}-${selectedDestination.type}`,
+                  { ...SOURCE_INTERNAL_TYPES, ...DESTINATION_INTERNAL_TYPES }
+                )}
+              />
+            )}
+          </Col>
+        </Row>
+      </Form>
+    </div>
+  )
 }
 
-export default JobCreation
+export default withAbortController(JobCreation)

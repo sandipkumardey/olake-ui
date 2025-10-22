@@ -7,6 +7,7 @@ import { Entity } from "@app-types/index"
 import { DeleteModalProps } from "@app-types/modalTypes"
 import { getConnectorImage } from "@utils/utils"
 
+//Entity Delete Modal
 const DeleteModal = ({ fromSource }: DeleteModalProps) => {
 	const {
 		showDeleteModal,
